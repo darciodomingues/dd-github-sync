@@ -1,141 +1,313 @@
 ---
 name: dd-github-sync
-description: Smart GitHub operations skill that automatically chooses between MCP tools and gh CLI for optimal token usage and consistency. USE THIS SKILL whenever the user wants to interact with GitHub (repos, issues, PRs, files, branches, search, etc.) — it will pick the most token-efficient approach automatically.
+description: Super-powered GitHub operations skill that automatically chooses between MCP tools and gh CLI for optimal token usage, consistency, and reliability. USE THIS SKILL whenever interacting with GitHub (repos, issues, PRs, files, branches, search, releases, actions, etc.) — it picks the most efficient approach with production-grade patterns.
+version: 2.0.0
 ---
 
-# dd-github-sync
+# dd-github-sync — Super Skill for GitHub Operations
 
-A smart wrapper around GitHub operations that chooses between **MCP tools** (`mcp__plugin_github_github__*`) and **gh CLI** (`Bash` with `gh` commands) based on the operation type to minimize token usage while maintaining consistency.
-
-## Core Philosophy
-
-**MCP for point operations, gh CLI for bulk/search operations.**
-
-| Use MCP (low token, structured) | Use gh CLI (token-efficient for bulk) |
-|----------------------------------|----------------------------------------|
-| Get single resource (issue, PR, file, repo) | List/search > 20 items (issues, PRs, repos, commits, code) |
-| Create/update single resource (branch, PR, file, issue) | Search code, commits, issues, repos |
-| Get diff/files for single PR | Pipeline multi-step ops (list → filter → act) |
-| Submit review, merge PR | Bulk operations with jq filtering |
+A production-grade wrapper around GitHub operations that intelligently routes between **MCP tools** (`mcp__plugin_github_github__*`) and **gh CLI** (`Bash` with `gh`) based on operation type, data volume, and context. Includes reusable patterns, error handling, rate limiting, and common workflow recipes.
 
 ---
 
-## Decision Algorithm
+## 🎯 Core Philosophy
 
+**MCP for point operations (typed, structured, low-token) · gh CLI for bulk/search/streaming (filter early, paginate smart) · Hybrid for complex workflows**
+
+| Dimension | MCP Tools | gh CLI |
+|-----------|-----------|--------|
+| **Best for** | Single resource CRUD, typed responses | Lists >20, search, pipelines, streaming |
+| **Token cost** | Low (structured JSON) | Low *if* `--json` + `--jq` used correctly |
+| **Reliability** | Auto-retry, typed errors | Manual retry, exit codes |
+| **Flexibility** | Fixed schema | Full API surface via `gh api` |
+
+---
+
+## 🧠 Decision Algorithm (Enhanced)
+
+```python
+def choose_tool(operation: str, estimated_count: int, context: dict) -> ToolChoice:
+    # Point operations → always MCP
+    if operation in POINT_OPS:
+        return MCP(tool=POINT_OP_MAP[operation])
+    
+    # Bulk/Search operations
+    if operation in BULK_OPS:
+        if estimated_count > 50:
+            return GH_CLI(pattern="streaming", jq_filter=context.get("jq"))
+        if estimated_count > 20:
+            return GH_CLI(pattern="batched", jq_filter=context.get("jq"))
+        return MCP(tool=BULK_OP_MAP[operation])  # small lists: MCP simpler
+    
+    # Complex workflows → hybrid
+    if operation in WORKFLOW_OPS:
+        return HYBRID(steps=context["steps"])
+    
+    # Unknown → default to gh CLI with safety limits
+    return GH_CLI(pattern="safe_default", limit=100)
 ```
-IF operation in {get_single, create_single, update_single, delete_single}:
-    USE MCP
-ELIF operation in {list, search} AND expected_count > 20:
-    USE gh CLI with --json + --jq filtering
-ELIF operation in {list, search} AND expected_count <= 20:
-    USE MCP (simpler, structured output)
-ELSE:
-    USE gh CLI (safer default for unknown volume)
-```
+
+### Operation Classification
+
+| Category | Operations | Default Tool |
+|----------|------------|--------------|
+| **POINT_OPS** | `get_repo`, `get_file`, `create_branch`, `create_pr`, `merge_pr`, `create_issue`, `update_issue`, `add_review`, `get_pr_diff`, `get_pr_files`, `create_release`, `get_release` | **MCP** |
+| **BULK_OPS** | `list_issues`, `list_prs`, `list_repos`, `list_branches`, `list_commits`, `list_releases`, `list_workflows`, `list_runs` | **gh CLI** (if >20) / **MCP** (if ≤20) |
+| **SEARCH_OPS** | `search_code`, `search_commits`, `search_issues`, `search_repos`, `search_users` | **gh CLI** (always) |
+| **WORKFLOW_OPS** | `create_pr_from_issue`, `sync_fork`, `bulk_label_issues`, `auto_merge_when_ready`, `cleanup_merged_branches` | **HYBRID** |
 
 ---
 
-## MCP Tools Reference (use for point ops)
+## 🛠 gh CLI Patterns Library (Token-Optimized)
 
-| Category | Tools |
-|----------|-------|
-| **Repos** | `get_file_contents`, `create_or_update_file`, `delete_file`, `push_files`, `create_repository`, `fork_repository` |
-| **Issues** | `issue_read` (get, get_comments, get_labels), `issue_write` (create, update) |
-| **PRs** | `pull_request_read` (get, get_diff, get_files, get_commits, get_review_comments, get_reviews, get_comments, get_status, get_check_runs), `create_pull_request`, `update_pull_request`, `merge_pull_request`, `update_pull_request_branch` |
-| **Reviews** | `pull_request_review_write` (create, submit_pending, resolve_thread, unresolve_thread), `add_comment_to_pending_review`, `add_reply_to_pull_request_comment` |
-| **Branches/Tags** | `create_branch`, `list_branches`, `list_tags`, `get_tag` |
-| **Releases** | `get_latest_release`, `get_release_by_tag`, `list_releases` |
-| **Search** | `search_code`, `search_commits`, `search_issues`, `search_pull_requests`, `search_repositories`, `search_users` |
-| **Collaborators** | `list_repository_collaborators` |
-| **Misc** | `get_me`, `get_commit`, `run_secret_scanning`, `request_copilot_review` |
+### Golden Rule: **Always `--json` + `--jq` filter BEFORE context**
 
----
-
-## gh CLI Patterns (use for bulk/search)
-
-### List with filtering (always use `--json` + `--jq`)
 ```bash
-# Issues/PRs - only fetch needed fields
-gh issue list --repo owner/repo --state open --limit 100 \
-  --json number,title,state,author,labels,createdAt \
-  --jq '.[] | {number, title, author: .author.login, labels: .labels[].name}'
+# ❌ BAD - full objects flood context
+gh pr list --repo owner/repo --state open
 
-gh pr list --repo owner/repo --state open --limit 50 \
-  --json number,title,headRefName,author,reviewDecision \
-  --jq '.[] | {number, title, branch: .headRefName, author: .author.login}'
-
-# Repos
-gh repo list owner --limit 100 --json name,description,private,updatedAt \
-  --jq '.[] | {name, description, private, updated: .updatedAt}'
-
-# Commits
-gh api repos/owner/repo/commits --paginate \
-  --jq '.[] | {sha: .sha, message: .commit.message, author: .commit.author.name, date: .commit.author.date}'
+# ✅ GOOD - only needed fields, filtered early
+gh pr list --repo owner/repo --state open --limit 100 \
+  --json number,title,headRefName,author,reviewDecision,isDraft \
+  --jq '.[] | {number, title, branch: .headRefName, author: .author.login, draft: .isDraft, review: .reviewDecision}'
 ```
 
-### Search (code, commits, issues, repos)
+### Reusable Field Sets (copy-paste)
+
 ```bash
-# Code search - only return paths
-gh api search/code -f q="repo:owner/repo function_name" \
-  --jq '.items[] | {path: .path, sha: .sha, repo: .repository.full_name}'
+# Minimal PR fields (90% of use cases)
+PR_FIELDS="number,title,headRefName,baseRefName,author,state,isDraft,reviewDecision,createdAt,updatedAt"
+PR_JQ='.[] | {number, title, head: .headRefName, base: .baseRefName, author: .author.login, state, draft: .isDraft, review: .reviewDecision}'
+
+# Minimal Issue fields
+ISSUE_FIELDS="number,title,state,author,labels,assignees,createdAt,updatedAt"
+ISSUE_JQ='.[] | {number, title, state, author: .author.login, labels: .labels[].name, assignees: .assignees[].login}'
+
+# Minimal Repo fields
+REPO_FIELDS="name,description,private,updatedAt,stargazerCount,forkCount,primaryLanguage"
+REPO_JQ='.[] | {name, description, private, updated: .updatedAt, stars: .stargazerCount, forks: .forkCount, language: .primaryLanguage?.name}'
+
+# Minimal Commit fields
+COMMIT_FIELDS="sha,message,author,committer,parents"
+COMMIT_JQ='.[] | {sha: .sha[0:7], message: .commit.message | split("\n")[0], author: .commit.author.name, date: .commit.author.date}'
+```
+
+### Search Patterns (always use `gh api` for search)
+
+```bash
+# Code search - only paths + context lines
+gh api search/code -f q="repo:owner/repo TODO" --per-page 50 \
+  --jq '.items[] | {path: .path, repo: .repository.full_name, sha: .sha, match: .text_matches[0].fragment}'
 
 # Commit search
-gh api search/commits -f q="repo:owner/repo fix bug" \
-  --jq '.items[] | {sha: .sha, message: .commit.message, author: .commit.author.name}'
+gh api search/commits -f q="repo:owner/repo fix bug" --per-page 50 \
+  --jq '.items[] | {sha: .sha[0:7], message: .commit.message | split("\n")[0], author: .commit.author.name, date: .commit.author.date}'
 
-# Issue/PR search
-gh api search/issues -f q="repo:owner/repo is:pr is:open" \
-  --jq '.items[] | {number, title, state, author: .user.login}'
+# Issue/PR search with filters
+gh api search/issues -f q="repo:owner/repo is:pr is:open label:bug" --per-page 100 \
+  --jq '.items[] | {number, title, state, author: .user.login, labels: .labels[].name}'
 ```
 
-### Pipeline pattern (list → filter → act)
+### Pipeline Patterns (list → filter → act)
+
 ```bash
-# Get PR numbers needing review, then fetch details
-gh pr list --repo owner/repo --state open --json number,reviewDecision \
+# Pattern 1: Filter PRs needing review, then fetch details
+gh pr list --repo o/r --state open --json number,reviewDecision,headRefName \
   --jq '.[] | select(.reviewDecision=="REVIEW_REQUIRED") | .number' | \
-  xargs -I {} gh pr view {} --repo owner/repo --json files,title,body
+  xargs -I {} gh pr view {} --repo o/r --json files,title,body,reviews
+
+# Pattern 2: Find stale branches, delete them
+gh api repos/o/r/branches --paginate --jq '.[] | select(.commit.commit.author.date < "2024-01-01") | .name' | \
+  xargs -I {} gh api -X DELETE repos/o/r/git/refs/heads/{}
+
+# Pattern 3: Bulk label issues
+gh issue list --repo o/r --state open --label "bug" --json number \
+  --jq '.[].number' | xargs -I {} gh issue edit {} --repo o/r --add-label "priority:high"
+
+# Pattern 4: Get all workflow runs for a PR
+gh api repos/o/r/actions/runs --paginate -f head_sha=$(gh pr view 123 --repo o/r --json headRefOid --jq .headRefOid) \
+  --jq '.workflow_runs[] | {name: .name, status: .conclusion, url: .html_url}'
 ```
 
 ---
 
-## Skill Usage Rules
+## 🔄 Hybrid Workflow Recipes (Common Multi-Step Operations)
 
-1. **ALWAYS** estimate result count before choosing tool
-2. **ALWAYS** use `--json` + `--jq` with gh CLI to minimize output tokens
-3. **NEVER** use `gh` without `--json` for list/search operations
-4. **PREFER** MCP for create/update/delete single resources (structured, typed)
-5. **PREFER** gh for any operation that might return > 50 items
-6. **COMBINE** when needed: MCP for auth/setup, gh for bulk, MCP for final action
+### Recipe 1: Create PR from Issue (with branch, commit, PR)
+```python
+# Step 1: MCP - Get issue details
+issue = mcp.issue_read.get(owner, repo, issue_number)
+
+# Step 2: MCP - Create branch from base
+branch = f"issue-{issue_number}-{slugify(issue.title)}"
+mcp.create_branch(owner, repo, branch, base="main")
+
+# Step 3: gh CLI - Create commit (or MCP push_files)
+# ... user makes changes ...
+
+# Step 4: MCP - Create PR
+pr = mcp.create_pull_request(owner, repo, title=issue.title, head=branch, base="main", body=f"Closes #{issue_number}")
+
+# Step 5: MCP - Link PR to issue (auto via "Closes #")
+```
+
+### Recipe 2: Auto-merge when checks pass
+```bash
+# Poll until all checks pass, then merge
+while true; do
+  STATUS=$(gh pr view $PR --repo o/r --json statusCheckRollup --jq '.statusCheckRollup[] | select(.conclusion=="FAILURE") | .context')
+  [ -z "$STATUS" ] && break
+  sleep 30
+done
+gh pr merge $PR --repo o/r --squash --delete-branch
+```
+
+### Recipe 3: Sync fork with upstream
+```bash
+# Add upstream if needed
+gh repo sync owner/fork --source upstream/repo --branch main
+# Or manual:
+git remote add upstream https://github.com/upstream/repo.git
+git fetch upstream
+git checkout main
+git merge upstream/main
+git push origin main
+```
+
+### Recipe 4: Bulk close stale issues
+```bash
+gh issue list --repo o/r --state open --json number,updatedAt \
+  --jq '.[] | select(.updatedAt < "2024-01-01") | .number' | \
+  xargs -I {} gh issue close {} --repo o/r --reason "stale"
+```
+
+### Recipe 5: Get all changed files in a PR with diff stats
+```bash
+gh pr view $PR --repo o/r --json files --jq '.files[] | {path: .path, additions: .additions, deletions: .deletions, status: .status}'
+```
 
 ---
 
-## Example Decisions
+## ⚙️ Configuration & Defaults
 
-| User Request | Decision | Reason |
-|--------------|----------|--------|
-| "Get issue #123" | MCP `issue_read` | Single resource |
-| "List all open issues" | gh CLI | Unknown count, likely > 20 |
-| "Create PR from branch X" | MCP `create_pull_request` | Single create |
-| "Search for 'TODO' in codebase" | gh CLI `search/code` | Search returns many |
-| "Get PR #45 diff" | MCP `pull_request_read` get_diff | Single resource |
-| "List all repos in org" | gh CLI `repo list` | Could be hundreds |
-| "Merge PR #10" | MCP `merge_pull_request` | Single action |
-| "Find all repos with topic:python" | gh CLI `api search/repositories` | Search + bulk |
+```yaml
+# .claude/skills/dd-github-sync/config.yaml (optional)
+defaults:
+  per_page: 100              # gh CLI pagination
+  max_pages: 10              # safety cap
+  timeout_seconds: 30        # gh CLI timeout
+  retry_attempts: 3          # gh CLI retries
+  retry_backoff: 2           # exponential base
+  
+token_optimization:
+  always_json_jq: true
+  max_items_in_context: 50   # truncate if exceeded
+  summarize_large_lists: true
+  
+fallback:
+  mcp_on_gh_failure: true
+  gh_on_mcp_failure: true
+  
+aliases:
+  me: "{{github_user}}"
+  my_org: "{{github_org}}"
+```
 
 ---
 
-## Error Handling
+## 🛡 Error Handling & Resilience
 
-- MCP: Returns structured errors, auto-retries on rate limit
-- gh CLI: Check exit code, stderr; implement retry with exponential backoff for rate limits
-- On MCP failure for bulk ops → fall back to gh CLI
-- On gh CLI failure for point ops → fall back to MCP
+### gh CLI Wrapper Function (use in Bash calls)
+```bash
+gh_retry() {
+  local max_attempts=3
+  local attempt=1
+  local backoff=2
+  
+  while [ $attempt -le $max_attempts ]; do
+    if output=$(gh "$@" 2>&1); then
+      echo "$output"
+      return 0
+    fi
+    
+    local exit_code=$?
+    if echo "$output" | grep -q "rate limit\|secondary rate limit"; then
+      sleep $((backoff * attempt))
+      attempt=$((attempt + 1))
+      continue
+    fi
+    
+    # Non-rate-limit error - fail fast
+    echo "gh command failed (attempt $attempt): $output" >&2
+    return $exit_code
+  done
+  
+  echo "gh command failed after $max_attempts attempts" >&2
+  return 1
+}
+
+# Usage: gh_retry pr list --repo o/r --json number,title --jq '.[] | {number, title}'
+```
+
+### MCP Fallback Pattern
+```python
+try:
+    result = mcp.pull_request_read.get_diff(owner, repo, pr_number)
+except MCPError as e:
+    if "rate limit" in str(e).lower():
+        # Fall back to gh CLI
+        result = bash(f"gh pr view {pr_number} --repo {owner}/{repo} --json diff --jq .diff")
+    else:
+        raise
+```
 
 ---
 
-## Token Optimization Tips
+## 📋 Quick Reference Card
 
-1. **Filter early**: Use `--jq` to select only needed fields BEFORE data reaches context
-2. **Paginate wisely**: `--limit N` on gh, `perPage` on MCP
-3. **Avoid full objects**: Never fetch full PR/issue objects when only title/number needed
-4. **Batch when possible**: gh CLI pipes multiple API calls in one tool invocation
+| Task | Command |
+|------|---------|
+| **My PRs needing review** | `gh pr list --author @me --state open --json number,title,reviewDecision --jq '.[] | select(.reviewDecision=="REVIEW_REQUIRED")'` |
+| **Open PRs in repo** | `gh pr list --repo o/r --state open --json number,title,headRefName,author --jq PR_JQ` |
+| **Search code** | `gh api search/code -f q="repo:o/r fn" --jq '.items[] | {path, sha}'` |
+| **Create PR** | `mcp.create_pull_request(owner, repo, title, head, base, body)` |
+| **Merge PR** | `mcp.merge_pull_request(owner, repo, pr_number, method="squash")` |
+| **Get file content** | `mcp.get_file_contents(owner, repo, path, ref="main")` |
+| **Push file** | `mcp.create_or_update_file(owner, repo, path, content, message, branch)` |
+| **List workflows** | `gh api repos/o/r/actions/workflows --jq '.workflows[] | {id, name, path, state}'` |
+| **Trigger workflow** | `gh api -X POST repos/o/r/actions/workflows/id/dispatches -f ref=main -f inputs='{}'` |
+| **Get run logs** | `gh run view RUN_ID --repo o/r --log` |
+
+---
+
+## 🔌 Integration with Other Skills
+
+- **`claude-code-setup:claude-automation-recommender`** → Add gh auth to settings
+- **`frontend-design:frontend-design`** → PR preview deployments
+- **`mcp-server-dev:build-mcp-server`** → GitHub webhook handlers
+- **`superpowers:subagent-driven-development`** → Parallel PR reviews
+
+---
+
+## ✅ Validation Checklist (run before complex ops)
+
+- [ ] Estimated result count < 50? → Consider MCP
+- [ ] Using `--json` + `--jq` on every gh list/search?
+- [ ] Pagination limited (`--limit`, `--per-page`)?
+- [ ] Rate limit handling in place?
+- [ ] Fallback defined for critical operations?
+- [ ] Only needed fields selected?
+- [ ] Large outputs summarized/truncated?
+
+---
+
+## 🎓 Skill Evolution Notes
+
+This skill embodies **token-aware GitHub operations**. Every pattern here was chosen because it:
+1. Minimizes tokens entering context (filter early!)
+2. Uses typed MCP where structure matters
+3. Uses streaming gh CLI where volume matters
+4. Provides fallback for resilience
+5. Documents the *why* for future maintenance
+
+**When in doubt**: Estimate count → if >20, gh CLI with `--json` + `--jq`; else MCP.
