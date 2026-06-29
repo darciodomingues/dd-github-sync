@@ -1,0 +1,42 @@
+# .claude/skills/dd-github-sync/config.yaml
+# Configuration for dd-github-sync super skill
+# Copy to .claude/skills/dd-github-sync/config.yaml to customize
+
+defaults:
+  per_page: 100              # gh CLI pagination
+  max_pages: 10              # safety cap
+  timeout_seconds: 30        # gh CLI timeout
+  retry_attempts: 3          # gh CLI retries for rate limits
+  retry_backoff: 2           # exponential backoff base (seconds)
+
+token_optimization:
+  always_json_jq: true
+  max_items_in_context: 50   # truncate/warn if list exceeds this
+  summarize_large_lists: true
+
+fallback:
+  mcp_on_gh_failure: true
+  gh_on_mcp_failure: true
+
+aliases:
+  me: "{{github_user}}"
+  my_org: "{{github_org}}"
+
+# Operation-specific overrides (optional)
+operations:
+  list_prs:
+    threshold_mcp: 20
+    default_fields: "number,title,headRefName,baseRefName,author,state,isDraft,reviewDecision"
+  list_issues:
+    threshold_mcp: 20
+    default_fields: "number,title,state,author,labels,assignees,createdAt"
+  list_repos:
+    threshold_mcp: 30
+    default_fields: "name,description,private,updatedAt,stargazerCount,forkCount,primaryLanguage"
+  search_code:
+    tool: "gh_cli"
+    default_fields: "path,sha,repository"
+  create_pr:
+    tool: "mcp"
+  merge_pr:
+    tool: "mcp"
